@@ -34,10 +34,10 @@ type fragmentInfo struct {
 	offset uint16
 	size   uint16
 	more   uint8
+	id     uint16
 }
 
 func TestIPv4FragmentReassembly(t *testing.T) {
-	const fragmentID = 42
 	icmpv4ProtoNum := uint8(header.ICMPv4ProtocolNumber)
 
 	tests := []struct {
@@ -46,27 +46,64 @@ func TestIPv4FragmentReassembly(t *testing.T) {
 		fragments    []fragmentInfo
 		expectReply  bool
 	}{
-		{
-			description:  "basic reassembly",
-			ipPayloadLen: 2000,
-			fragments: []fragmentInfo{
-				{offset: 0, size: 1000, more: header.IPv4FlagMoreFragments},
-				{offset: 1000, size: 1000, more: 0},
+		/*
+			{
+				description:  "basic reassembly",
+				ipPayloadLen: 3000,
+				fragments: []fragmentInfo{
+					{offset: 0, size: 1000, id: 5, more: header.IPv4FlagMoreFragments},
+					{offset: 1000, size: 1000, id: 5, more: header.IPv4FlagMoreFragments},
+					{offset: 2000, size: 1000, id: 5, more: 0},
+				},
+				expectReply: true,
 			},
-			expectReply: true,
-		},
-		{
-			description:  "out of order fragments",
-			ipPayloadLen: 2000,
-			fragments: []fragmentInfo{
-				{offset: 1000, size: 1000, more: 0},
-				{offset: 0, size: 1000, more: header.IPv4FlagMoreFragments},
+			{
+				description:  "out of order fragments",
+				ipPayloadLen: 3000,
+				fragments: []fragmentInfo{
+					{offset: 2000, size: 1000, id: 6, more: 0},
+					{offset: 0, size: 1000, id: 6, more: header.IPv4FlagMoreFragments},
+					{offset: 1000, size: 1000, id: 6, more: header.IPv4FlagMoreFragments},
+				},
+				expectReply: true,
 			},
-			expectReply: true,
+			{
+				description:  "duplicated fragments",
+				ipPayloadLen: 3000,
+				fragments: []fragmentInfo{
+					{offset: 0, size: 1000, id: 7, more: header.IPv4FlagMoreFragments},
+					{offset: 1000, size: 1000, id: 7, more: header.IPv4FlagMoreFragments},
+					{offset: 1000, size: 1000, id: 7, more: header.IPv4FlagMoreFragments},
+					{offset: 2000, size: 1000, id: 7, more: 0},
+				},
+				expectReply: true,
+			},
+			{
+				description:  "fragment subset",
+				ipPayloadLen: 3000,
+				fragments: []fragmentInfo{
+					{offset: 0, size: 1000, id: 8, more: header.IPv4FlagMoreFragments},
+					{offset: 1000, size: 1000, id: 8, more: header.IPv4FlagMoreFragments},
+					{offset: 512, size: 256, id: 8, more: header.IPv4FlagMoreFragments},
+					{offset: 2000, size: 1000, id: 8, more: 0},
+				},
+				expectReply: true,
+			},
+		*/
+		{
+			description:  "fragment overlap",
+			ipPayloadLen: 3000,
+			fragments: []fragmentInfo{
+				{offset: 0, size: 1000, id: 9, more: header.IPv4FlagMoreFragments},
+				{offset: 1512, size: 1000, id: 9, more: header.IPv4FlagMoreFragments},
+				{offset: 1000, size: 1000, id: 9, more: header.IPv4FlagMoreFragments},
+				{offset: 2000, size: 1000, id: 9, more: 0},
+			},
+			expectReply: false,
 		},
 	}
 
-	for _, test := range tests {
+	for i, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
 			dut := testbench.NewDUT(t)
 			defer dut.TearDown()
@@ -96,7 +133,7 @@ func TestIPv4FragmentReassembly(t *testing.T) {
 						Protocol:       &icmpv4ProtoNum,
 						FragmentOffset: testbench.Uint16(fragment.offset),
 						Flags:          testbench.Uint8(fragment.more),
-						ID:             testbench.Uint16(fragmentID),
+						ID:             testbench.Uint16(fragment.id),
 					},
 					&testbench.Payload{
 						Bytes: data[fragment.offset:][:fragment.size],
@@ -115,7 +152,7 @@ func TestIPv4FragmentReassembly(t *testing.T) {
 				}, time.Second)
 				if err != nil {
 					// Either an unexpected frame was received, or none at all.
-					if bytesReceived < test.ipPayloadLen {
+					if test.expectReply && bytesReceived < test.ipPayloadLen {
 						t.Fatalf("received %d bytes out of %d, then conn.ExpectFrame(_, _, time.Second) failed with %s", bytesReceived, test.ipPayloadLen, err)
 					}
 					break
