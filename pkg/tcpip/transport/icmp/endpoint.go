@@ -15,6 +15,7 @@
 package icmp
 
 import (
+	"gvisor.dev/gvisor/pkg/sleep"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
@@ -83,6 +84,10 @@ type endpoint struct {
 
 	// ops is used to get socket level options.
 	ops tcpip.SocketOptions
+
+	// resCh is used to allow callers to wait on address resolution. It is nil
+	// iff address resolution is not being performed.
+	resCh chan struct{} `state:"nosave"`
 }
 
 func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, transProto tcpip.TransportProtocolNumber, waiterQueue *waiter.Queue) (tcpip.Endpoint, *tcpip.Error) {
@@ -273,22 +278,6 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-c
 	var route *stack.Route
 	if to == nil {
 		route = &e.route
-
-		if route.IsResolutionRequired() {
-			// Promote lock to exclusive if using a shared route,
-			// given that it may need to change in Route.Resolve()
-			// call below.
-			e.mu.RUnlock()
-			defer e.mu.RLock()
-
-			e.mu.Lock()
-			defer e.mu.Unlock()
-
-			// Recheck state after lock was re-acquired.
-			if e.state != stateConnected {
-				return 0, nil, tcpip.ErrInvalidEndpointState
-			}
-		}
 	} else {
 		// Reject destination address if it goes through a different
 		// NIC than the endpoint was bound to.
@@ -317,9 +306,37 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-c
 	}
 
 	if route.IsResolutionRequired() {
-		if ch, err := route.Resolve(nil); err != nil {
+		e.mu.RUnlock()
+		defer e.mu.RLock()
+
+		e.mu.Lock()
+		defer e.mu.Unlock()
+
+		// Recheck state after lock was re-acquired.
+		if e.state != stateConnected {
+			return 0, nil, tcpip.ErrInvalidEndpointState
+		}
+
+		waker := &sleep.Waker{}
+		if err := route.Resolve(nil, waker); err != nil {
 			if err == tcpip.ErrWouldBlock {
-				return 0, ch, tcpip.ErrNoLinkAddress
+				if e.resCh == nil {
+					e.resCh = make(chan struct{})
+					go func() {
+						s := sleep.Sleeper{}
+						defer s.Done()
+
+						s.AddWaker(waker, 0)
+						_, _ = s.Fetch(true /* block */)
+
+						e.mu.Lock()
+						defer e.mu.Unlock()
+
+						close(e.resCh)
+						e.resCh = nil
+					}()
+				}
+				return 0, e.resCh, tcpip.ErrNoLinkAddress
 			}
 			return 0, nil, err
 		}
