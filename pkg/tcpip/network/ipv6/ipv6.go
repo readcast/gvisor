@@ -1121,7 +1121,7 @@ func (e *endpoint) Close() {
 	e.mu.addressableEndpointState.Cleanup()
 	e.mu.Unlock()
 
-	e.protocol.forgetEndpoint(e)
+	e.protocol.forgetEndpoint(e, e.nic.ID())
 }
 
 // NetworkProtocolNumber implements stack.NetworkEndpoint.NetworkProtocolNumber.
@@ -1412,7 +1412,7 @@ type protocol struct {
 	mu struct {
 		sync.RWMutex
 
-		eps map[*endpoint]struct{}
+		eps map[tcpip.NICID]*endpoint
 	}
 
 	ids    []uint32
@@ -1496,14 +1496,14 @@ func (p *protocol) NewEndpoint(nic stack.NetworkInterface, linkAddrCache stack.L
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.mu.eps[e] = struct{}{}
+	p.mu.eps[nic.ID()] = e
 	return e
 }
 
-func (p *protocol) forgetEndpoint(e *endpoint) {
+func (p *protocol) forgetEndpoint(e *endpoint, nicID tcpip.NICID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.mu.eps, e)
+	delete(p.mu.eps, nicID)
 }
 
 // SetOption implements NetworkProtocol.SetOption.
@@ -1578,7 +1578,7 @@ func (p *protocol) SetForwarding(v bool) {
 		return
 	}
 
-	for ep := range p.mu.eps {
+	for _, ep := range p.mu.eps {
 		ep.transitionForwarding(v)
 	}
 }
@@ -1671,7 +1671,7 @@ func NewProtocolWithOptions(opts Options) stack.NetworkProtocolFactory {
 			autoGenIPv6LinkLocal: opts.AutoGenIPv6LinkLocal,
 		}
 		p.fragmentation = fragmentation.NewFragmentation(header.IPv6FragmentExtHdrFragmentOffsetBytesPerUnit, fragmentation.HighFragThreshold, fragmentation.LowFragThreshold, ReassembleTimeout, s.Clock(), p)
-		p.mu.eps = make(map[*endpoint]struct{})
+		p.mu.eps = make(map[tcpip.NICID]*endpoint)
 		p.SetDefaultTTL(DefaultTTL)
 		return p
 	}
